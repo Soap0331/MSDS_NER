@@ -1,0 +1,561 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>产品成分交集可视化</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #header {
+            padding: 10px;
+            background: #f0f0f0;
+            border-bottom: 1px solid #ccc;
+        }
+        #container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        #graph {
+            flex: 2;
+            overflow: hidden;
+            position: relative;
+        }
+        #info-panel {
+            flex: 1;
+            padding: 15px;
+            overflow: auto;
+            border-left: 1px solid #ccc;
+            max-width: 300px;
+        }
+        .node {
+            stroke: #fff;
+            stroke-width: 1.5px;
+        }
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+        }
+        #tooltip {
+            position: absolute;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            pointer-events: none;
+            display: none;
+            max-width: 300px;
+        }
+        #controls {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 4px;
+        }
+        button {
+            padding: 5px 10px;
+            margin-right: 5px;
+            cursor: pointer;
+        }
+        .slider-container {
+            margin: 10px 0;
+        }
+        #search {
+            width: 100%;
+            padding: 5px;
+            margin-bottom: 10px;
+        }
+        .cas-list {
+            margin-top: 10px;
+            max-height: 300px;
+            overflow: auto;
+            border: 1px solid #eee;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .cas-item {
+            padding: 5px;
+            margin: 2px 0;
+            border-radius: 3px;
+        }
+        .cas-item:hover {
+            background: #f0f0f0;
+        }
+        .highlight {
+            stroke: #ff0000;
+            stroke-width: 2px;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            background: rgba(255,255,255,0.8);
+            padding: 20px;
+            border-radius: 5px;
+            z-index: 1000;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 10px;
+            background: #eee;
+            font-size: 12px;
+            margin-left: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h2>产品成分交集可视化</h2>
+        <p>每个节点是一个产品，连线表示两个产品有共同成分，连线越粗表示共同成分越多。</p>
+    </div>
+    <div id="container">
+        <div id="graph">
+            <div id="loading">加载中...</div>
+            <div id="tooltip"></div>
+        </div>
+        <div id="info-panel">
+            <div id="controls">
+                <input type="text" id="search" placeholder="搜索产品...">
+                <div class="slider-container">
+                    <label for="link-threshold">最小交集阈值: <span id="threshold-value">1</span></label>
+                    <input type="range" id="link-threshold" min="1" max="20" value="1">
+                </div>
+                <button id="reset">重置视图</button>
+                <label><input type="checkbox" id="use-force" checked> 启用力导向</label>
+            </div>
+            <div id="product-info">
+                <h3>选择一个产品查看详情</h3>
+                <p>点击节点查看产品的成分信息，点击连线查看两个产品共有的成分。</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+        // 全局变量
+        let graph;
+        let simulation;
+        let svg;
+        let link;
+        let node;
+        let nodeData;
+        let linkData;
+        let allData;
+        let width;
+        let height;
+        let selectedNode = null;
+        let selectedLink = null;
+        let linkThreshold = 1;
+
+        // 监听窗口大小变化
+        window.addEventListener('resize', () => {
+            updateVisualization();
+        });
+
+        // 初始化
+        async function init() {
+            try {
+                // 加载数据
+                const response = await fetch('product_intersection_data.json');
+                allData = await response.json();
+
+                document.getElementById('loading').style.display = 'none';
+
+                // 初始化可视化
+                updateVisualization();
+
+                // 设置事件监听器
+                document.getElementById('link-threshold').addEventListener('input', function() {
+                    linkThreshold = parseInt(this.value);
+                    document.getElementById('threshold-value').textContent = linkThreshold;
+                    updateVisualization();
+                });
+
+                document.getElementById('reset').addEventListener('click', function() {
+                    selectedNode = null;
+                    selectedLink = null;
+                    document.getElementById('link-threshold').value = 1;
+                    linkThreshold = 1;
+                    document.getElementById('threshold-value').textContent = 1;
+                    document.getElementById('search').value = '';
+                    updateProductInfo();
+                    updateVisualization();
+                });
+
+                document.getElementById('search').addEventListener('input', function() {
+                    const searchTerm = this.value.toLowerCase();
+                    if (searchTerm) {
+                        const foundNode = nodeData.find(n => n.id.toLowerCase().includes(searchTerm));
+                        if (foundNode) {
+                            selectedNode = foundNode;
+                            highlightConnections();
+                            updateProductInfo();
+
+                            // Center view on selected node
+                            const transform = d3.zoomTransform(svg.node());
+                            const scale = transform.k;
+                            const x = -foundNode.x * scale + width/2;
+                            const y = -foundNode.y * scale + height/2;
+                            svg.transition().duration(500)
+                               .call(zoom.transform, d3.zoomIdentity.translate(x, y).scale(scale));
+                        }
+                    } else {
+                        selectedNode = null;
+                        highlightConnections();
+                        updateProductInfo();
+                    }
+                });
+
+                document.getElementById('use-force').addEventListener('change', function() {
+                    if (this.checked) {
+                        simulation.restart();
+                    } else {
+                        simulation.stop();
+                    }
+                });
+            } catch (error) {
+                console.error('Error loading data:', error);
+                document.getElementById('loading').textContent = '加载数据出错！';
+            }
+        }
+
+        // 更新可视化
+        function updateVisualization() {
+            // 清除之前的可视化
+            d3.select('#graph svg').remove();
+
+            // 获取容器尺寸
+            const container = document.getElementById('graph');
+            width = container.clientWidth;
+            height = container.clientHeight;
+
+            // 过滤连接数据
+            const filteredLinks = allData.links.filter(d => d.value >= linkThreshold);
+
+            // 创建节点和连接的副本
+            nodeData = JSON.parse(JSON.stringify(allData.nodes));
+            linkData = JSON.parse(JSON.stringify(filteredLinks));
+
+            // 为模拟创建正确的对象引用
+            linkData.forEach(link => {
+                link.source = nodeData.find(node => node.id === link.source);
+                link.target = nodeData.find(node => node.id === link.target);
+            });
+
+            // 创建SVG
+            svg = d3.select('#graph')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+
+            // 添加缩放功能
+            const zoom = d3.zoom()
+                .scaleExtent([0.1, 10])
+                .on('zoom', (event) => {
+                    g.attr('transform', event.transform);
+                });
+
+            svg.call(zoom);
+
+            // 创建一个组来包含所有元素
+            const g = svg.append('g');
+
+            // 为连接创建箭头
+            svg.append('defs').append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '-0 -5 10 10')
+                .attr('refX', 15)
+                .attr('refY', 0)
+                .attr('orient', 'auto')
+                .attr('markerWidth', 6)
+                .attr('markerHeight', 6)
+                .attr('xoverflow', 'visible')
+                .append('svg:path')
+                .attr('d', 'M 0,-5 L 10 ,0 L 0,5')
+                .attr('fill', '#999')
+                .style('stroke', 'none');
+
+            // 创建连接
+            link = g.append('g')
+                .selectAll('line')
+                .data(linkData)
+                .enter()
+                .append('line')
+                .attr('class', 'link')
+                .style('stroke-width', d => Math.sqrt(d.value))
+                .on('mouseover', function(event, d) {
+                    showTooltip(event, `${d.source.id} 和 ${d.target.id} 有 ${d.value} 个共同成分`);
+                })
+                .on('mousemove', moveTooltip)
+                .on('mouseout', hideTooltip)
+                .on('click', function(event, d) {
+                    event.stopPropagation();
+                    selectedLink = d;
+                    selectedNode = null;
+                    highlightConnections();
+                    updateProductInfo();
+                });
+
+            // 创建节点
+            node = g.append('g')
+                .selectAll('circle')
+                .data(nodeData)
+                .enter()
+                .append('circle')
+                .attr('class', 'node')
+                .attr('r', d => Math.sqrt(d.cas_count) + 3)
+                .style('fill', d => colorScale(d.cas_count))
+                .on('mouseover', function(event, d) {
+                    showTooltip(event, `${d.id}<br>成分数: ${d.cas_count}`);
+                })
+                .on('mousemove', moveTooltip)
+                .on('mouseout', hideTooltip)
+                .on('click', function(event, d) {
+                    event.stopPropagation();
+                    selectedNode = d;
+                    selectedLink = null;
+                    highlightConnections();
+                    updateProductInfo();
+                })
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended));
+
+            // 为节点添加标签
+            const labels = g.append('g')
+                .selectAll('text')
+                .data(nodeData)
+                .enter()
+                .append('text')
+                .text(d => {
+                    // 截断长产品ID
+                    if (d.id.length > 15) {
+                        return d.id.substring(0, 12) + '...';
+                    }
+                    return d.id;
+                })
+                .attr('font-size', '10px')
+                .attr('dx', 12)
+                .attr('dy', 4)
+                .style('pointer-events', 'none') // 确保文本不会影响鼠标事件
+                .style('opacity', 0.8);
+
+            // 点击背景时清除选择
+            svg.on('click', function() {
+                selectedNode = null;
+                selectedLink = null;
+                highlightConnections();
+                updateProductInfo();
+            });
+
+            // 设置力模拟
+            simulation = d3.forceSimulation(nodeData)
+                .force('link', d3.forceLink(linkData).id(d => d.id).distance(100))
+                .force('charge', d3.forceManyBody().strength(-200))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(d => Math.sqrt(d.cas_count) + 10))
+                .on('tick', ticked);
+
+            // 更新模拟每一步
+            function ticked() {
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+
+                node
+                    .attr('cx', d => d.x = Math.max(20, Math.min(width - 20, d.x)))
+                    .attr('cy', d => d.y = Math.max(20, Math.min(height - 20, d.y)));
+
+                labels
+                    .attr('x', d => d.x)
+                    .attr('y', d => d.y);
+            }
+
+            // 突出显示选中的节点和连接
+            highlightConnections();
+        }
+
+        // 根据成分数量的颜色比例尺
+        const colorScale = d3.scaleSequential(d3.interpolateBlues)
+            .domain([0, 30]); // 假设最大成分数为30
+
+        // 拖拽函数
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+
+        function dragended(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+        }
+
+        // 工具提示函数
+        function showTooltip(event, text) {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.innerHTML = text;
+            tooltip.style.display = 'block';
+            tooltip.style.left = (event.pageX + 10) + 'px';
+            tooltip.style.top = (event.pageY + 10) + 'px';
+        }
+
+        function moveTooltip(event) {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.style.left = (event.pageX + 10) + 'px';
+            tooltip.style.top = (event.pageY + 10) + 'px';
+        }
+
+        function hideTooltip() {
+            document.getElementById('tooltip').style.display = 'none';
+        }
+
+        // 突出显示连接
+        function highlightConnections() {
+            if (!node || !link) return;
+
+            if (selectedNode) {
+                // 与选定节点连接的所有节点和连接
+                const connectedNodeIds = new Set();
+                linkData.forEach(l => {
+                    if (l.source.id === selectedNode.id) connectedNodeIds.add(l.target.id);
+                    if (l.target.id === selectedNode.id) connectedNodeIds.add(l.source.id);
+                });
+
+                node.classed('highlight', d => d.id === selectedNode.id);
+                node.style('opacity', d => d.id === selectedNode.id || connectedNodeIds.has(d.id) ? 1 : 0.2);
+
+                link.classed('highlight', l => l.source.id === selectedNode.id || l.target.id === selectedNode.id);
+                link.style('opacity', l => l.source.id === selectedNode.id || l.target.id === selectedNode.id ? 1 : 0.1);
+
+            } else if (selectedLink) {
+                // 选定连接和相关节点
+                node.classed('highlight', false);
+                node.style('opacity', d =>
+                    d.id === selectedLink.source.id || d.id === selectedLink.target.id ? 1 : 0.2);
+
+                link.classed('highlight', l => l === selectedLink);
+                link.style('opacity', l => l === selectedLink ? 1 : 0.1);
+
+            } else {
+                // 没有选择，恢复所有
+                node.classed('highlight', false);
+                node.style('opacity', 1);
+                link.classed('highlight', false);
+                link.style('opacity', 0.6);
+            }
+        }
+
+        // 更新产品信息面板
+        function updateProductInfo() {
+            const infoPanel = document.getElementById('product-info');
+
+            if (selectedNode) {
+                // 显示选定节点的信息
+                const connectedLinks = linkData.filter(l =>
+                    l.source.id === selectedNode.id || l.target.id === selectedNode.id);
+
+                let html = `<h3>产品: ${selectedNode.id}</h3>`;
+                html += `<p>成分数量: ${selectedNode.cas_count}</p>`;
+
+                if (connectedLinks.length > 0) {
+                    html += `<p>与其他 ${connectedLinks.length} 个产品有共同成分</p>`;
+                    html += `<h4>成分列表:</h4>`;
+                    html += `<div class="cas-list">`;
+
+                    // 查找该产品的成分信息
+                    const casObjects = [];
+                    for (const cas of selectedNode.cas_list) {
+                        // 从任何连接中找到该CAS号的名称
+                        let name = "Unknown";
+                        for (const link of connectedLinks) {
+                            const casItem = link.cas_intersection.find(c => c.cas === cas);
+                            if (casItem) {
+                                name = casItem.name;
+                                break;
+                            }
+                        }
+                        casObjects.push({ cas, name });
+                    }
+
+                    // 按名称排序并显示
+                    casObjects.sort((a, b) => a.name.localeCompare(b.name));
+                    for (const casObj of casObjects) {
+                        const sharedCount = connectedLinks.filter(l =>
+                            l.cas_intersection.some(c => c.cas === casObj.cas)).length;
+
+                        html += `<div class="cas-item" data-cas="${casObj.cas}">
+                            ${casObj.name} (${casObj.cas})
+                            <span class="badge" title="此成分与其他${sharedCount}个产品共享">${sharedCount}</span>
+                        </div>`;
+                    }
+
+                    html += `</div>`;
+
+                } else {
+                    html += `<p>此产品与其他产品没有共同成分。</p>`;
+                }
+
+                infoPanel.innerHTML = html;
+
+            } else if (selectedLink) {
+                // 显示选定连接的信息
+                const source = selectedLink.source.id;
+                const target = selectedLink.target.id;
+                const casIntersection = selectedLink.cas_intersection;
+
+                let html = `<h3>产品交集</h3>`;
+                html += `<p>${source}</p>`;
+                html += `<p>${target}</p>`;
+                html += `<p>共有 ${casIntersection.length} 个共同成分</p>`;
+
+                html += `<h4>共同成分:</h4>`;
+                html += `<div class="cas-list">`;
+
+                // 按名称排序
+                const sortedCAS = [...casIntersection].sort((a, b) => a.name.localeCompare(b.name));
+                for (const cas of sortedCAS) {
+                    html += `<div class="cas-item" data-cas="${cas.cas}">
+                        ${cas.name} (${cas.cas})
+                    </div>`;
+                }
+
+                html += `</div>`;
+
+                infoPanel.innerHTML = html;
+
+            } else {
+                // 没有选择，显示默认信息
+                infoPanel.innerHTML = `
+                    <h3>选择一个产品查看详情</h3>
+                    <p>点击节点查看产品的成分信息，点击连线查看两个产品共有的成分。</p>
+                `;
+            }
+        }
+
+        // 启动应用
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
+    
